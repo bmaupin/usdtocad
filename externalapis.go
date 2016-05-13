@@ -1,17 +1,19 @@
 package main
 
 import (
-	"bytes"
-	"crypto/tls"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
 	"time"
+
+	"golang.org/x/net/html"
+
+	"github.com/bmaupin/go-util/htmlutil"
 )
 
 const (
@@ -29,6 +31,10 @@ func getRateFromOXR(date time.Time) (float64, error) {
 		return 0, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("Bad HTTP Response: %v", resp.Status)
+	}
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
@@ -49,71 +55,60 @@ func getRateFromOXR(date time.Time) (float64, error) {
 	return oxrResponse.Rates["CAD"], nil
 }
 
-func getRateFromVisa() (float64, error) {
-	// Encode the user ID/pass using base64
-	encodedUserIdPass := base64.StdEncoding.EncodeToString([]byte(os.Getenv("VISA_USER_PASS")))
+func getRateFromVisa(t time.Time) (float64, error) {
+	v := url.Values{}
+	v.Add("fromCurr", "CAD")
+	v.Add("toCurr", "USD")
+	v.Add("fee", "0")
+	v.Add("exchangedate", t.Format("01/02/2006"))
 
-	var jsonStr = []byte(`{
-		"destinationCurrencyCode": "124",
-		"sourceCurrencyCode": "840",
-		"sourceAmount": "1"
-		}`)
-	req, err := http.NewRequest("POST", visaFxUrl, bytes.NewBuffer(jsonStr))
-	// Get the response as JSON (default is XML)
-	req.Header.Set("Accept", "application/json")
-	// Required
-	req.Header.Set("Authorization", "Basic "+encodedUserIdPass)
-	// Required
-	req.Header.Set("Content-Type", "application/json")
+	url := fmt.Sprintf("https://usa.visa.com/support/consumer/travel-support/exchange-rate-calculator.html/?%s", v.Encode())
 
-	// Load client cert
-	cert, err := tls.LoadX509KeyPair("visa-client-cert.pem", "visa-client-key.pem")
+	client := &http.Client{}
+
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return 0, err
+		log.Fatalln(err)
 	}
 
-	// Set up HTTPS client
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{Certificates: []tls.Certificate{cert}},
-	}
-	client := &http.Client{Transport: tr}
+	req.Header.Set("User-Agent", "Golang")
 
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("Bad HTTP Response: %v", resp.Status)
-	}
-
-	body, err := ioutil.ReadAll(resp.Body)
+	doc, err := html.Parse(resp.Body)
 	if err != nil {
 		return 0, err
 	}
 
-	type ExchangeRate struct {
-		ConversionRate    string
-		DestinationAmount string
-	}
-
-	exchangeRate := &ExchangeRate{}
-	err = json.Unmarshal(body, &exchangeRate)
+	/*
+		This is what we're looking for:
+		<p class="exchgName">
+			<span class="results"><strong>1</strong> United States Dollar = <strong>1.258974</strong> Canadian Dollar</span>
+		</p><br>
+	*/
+	resultsNode, err := htmlutil.GetFirstHtmlNode(doc, "span", "class", "results")
 	if err != nil {
 		return 0, err
 	}
 
-	visaRate, err := strconv.ParseFloat(exchangeRate.ConversionRate, 64)
-
-	// TODO: remove this in production
-	u, err := url.Parse(visaFxUrl)
+	strongNodes, err := htmlutil.GetAllHtmlNodes(resultsNode, "strong", "", "")
 	if err != nil {
 		return 0, err
 	}
-	if u.Host == "sandbox.api.visa.com" && visaRate <= 1 {
-		return 0, fmt.Errorf("Error: fake rate returned from visa API sandbox")
+
+	for _, strongNode := range strongNodes {
+		if strongNode.FirstChild.Data == "1" {
+			continue
+		}
+		visaRate, err := strconv.ParseFloat(strongNode.FirstChild.Data, 64)
+		if err != nil {
+			return 0, err
+		}
+		return visaRate, nil
 	}
 
-	return visaRate, nil
+	return 0, fmt.Errorf("Exchange rate not found")
 }
