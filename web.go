@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"time"
 )
 
 func main() {
@@ -25,29 +24,27 @@ func hello(res http.ResponseWriter, req *http.Request) {
 }
 
 func showRates(res http.ResponseWriter) error {
-	ds, err := newDataStore()
+	ds, err := newDataStore("")
 	defer ds.session.Close()
 	if err != nil {
 		return err
 	}
 
-	fromCurrency := "USD"
-	toCurrency := "CAD"
 	ratesOXR := []float64{}
 	ratesVisa := []float64{}
 
 	fmt.Fprintf(res, "%v to %v\n\n", fromCurrency, toCurrency)
 	fmt.Fprintf(res, "%-16v%-16v%-16vVisa difference\n", "", "OXR", "Visa")
 
-	ratePairUSDCAD, err := ds.GetRatePair(fromCurrency, toCurrency, 1)
+	ratePairUSDCAD, err := ds.GetOrAddRatePair(fromCurrency, toCurrency, 1)
 	if err != nil {
 		return err
 	}
-	rateSourceVisa, err := ds.GetRateSource(dbSourceVisa)
+	rateSourceVisa, err := ds.GetOrAddRateSource(dbSourceVisa)
 	if err != nil {
 		return err
 	}
-	rateSourceOXR, err := ds.GetRateSource(dbSourceOXR)
+	rateSourceOXR, err := ds.GetOrAddRateSource(dbSourceOXR)
 	if err != nil {
 		return err
 	}
@@ -57,17 +54,18 @@ func showRates(res http.ResponseWriter) error {
 		return err
 	}
 
-	for i := -31; i <= -1; i++ {
+	// Show data for the last 30 days
+	for i := -29; i <= 0; i++ {
 		date := stripTimeFromDate(mostRecentVisaRateDate.AddDate(0, 0, i))
 
-		rateVisa, err := ds.GetRateValue(ratePairUSDCAD, rateSourceVisa, date)
+		rateVisa, err := ds.GetOrAddRateValue(ratePairUSDCAD, rateSourceVisa, date)
 		if err != nil {
 			// TODO: stop if we hit an error with the Visa API
 			break
 		}
 		ratesVisa = append(ratesVisa, rateVisa)
 
-		rateOXR, err := ds.GetRateValue(ratePairUSDCAD, rateSourceOXR, date)
+		rateOXR, err := ds.GetOrAddRateValue(ratePairUSDCAD, rateSourceOXR, date)
 		if err != nil {
 			return err
 		}
@@ -92,10 +90,6 @@ func showRates(res http.ResponseWriter) error {
 	)
 
 	return nil
-}
-
-func stripTimeFromDate(t time.Time) time.Time {
-	return t.UTC().Truncate(time.Duration(time.Hour * 24))
 }
 
 func average(f []float64) float64 {

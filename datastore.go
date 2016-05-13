@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -17,6 +18,9 @@ const (
 	dbSourceVisa      = "visa.com"
 	timeFormat        = "2006-01-02"
 )
+
+// ErrRateExists is returned by AddRateValue when the rate to add already exists
+var ErrRateExists = errors.New("rate already exists")
 
 type (
 	Rate struct {
@@ -44,12 +48,15 @@ type DataStore struct {
 	session *mgo.Session
 }
 
-func newDataStore() (*DataStore, error) {
+func newDataStore(url string) (*DataStore, error) {
+	var err error
 	ds := &DataStore{}
 
-	var err error
+	if url == "" {
+		url = os.Getenv("OPENSHIFT_MONGODB_DB_URL")
+	}
 
-	ds.session, err = mgo.Dial(os.Getenv("OPENSHIFT_MONGODB_DB_URL"))
+	ds.session, err = mgo.Dial(url)
 	if err != nil {
 		return ds, err
 	}
@@ -68,7 +75,7 @@ func (ds *DataStore) GetCollection(name string) *mgo.Collection {
 }
 
 // Returns a rate pair given its from currency, to currency, and amount
-func (ds *DataStore) GetRatePair(from string, to string, amount float64) (RatePair, error) {
+func (ds *DataStore) GetOrAddRatePair(from string, to string, amount float64) (RatePair, error) {
 	ratePairsColl := ds.GetCollection(dbCollRatePairs)
 	ratePair := RatePair{}
 
@@ -97,7 +104,7 @@ func (ds *DataStore) GetRatePair(from string, to string, amount float64) (RatePa
 }
 
 // Returns a rate source given its name
-func (ds *DataStore) GetRateSource(name string) (RateSource, error) {
+func (ds *DataStore) GetOrAddRateSource(name string) (RateSource, error) {
 	rateSourcesColl := ds.GetCollection(dbCollRateSources)
 	rateSource := RateSource{}
 	err := rateSourcesColl.Find(bson.M{"name": name}).One(&rateSource)
@@ -123,7 +130,7 @@ func (ds *DataStore) GetRateSource(name string) (RateSource, error) {
 }
 
 // Returns the value of a rate given a rate pair, rate source, and date
-func (ds *DataStore) GetRateValue(ratePair RatePair, rateSource RateSource, date time.Time) (float64, error) {
+func (ds *DataStore) GetOrAddRateValue(ratePair RatePair, rateSource RateSource, date time.Time) (float64, error) {
 	rate := Rate{}
 	ratesColl := ds.GetCollection(dbCollRates)
 
@@ -143,27 +150,20 @@ func (ds *DataStore) GetRateValue(ratePair RatePair, rateSource RateSource, date
 			if err != nil {
 				return 0, err
 			}
-			// Don't save today's rate in the DB since it will change throughout the day
-			if date == today {
-				return rateValue, nil
-			}
 
 		} else if rateSource.Name == dbSourceVisa {
-			if date != today {
-				return 0, fmt.Errorf("Error: visa.com API only provides current rate")
-			}
-			rateValue, err = getRateFromVisa()
+			rateValue, err = getRateFromVisa(date)
 			if err != nil {
 				return 0, err
 			}
 		}
 
-		err = ratesColl.Insert(&Rate{
-			RatePairID:   ratePair.ID,
-			RateSourceID: rateSource.ID,
-			Date:         date,
-			Value:        rateValue,
-		})
+		// Don't save today's rate in the DB since it will change throughout the day
+		if date == today {
+			return rateValue, nil
+		}
+
+		err = ds.AddRateValue(ratePair, rateSource, date, rateValue)
 		if err != nil {
 			return 0, err
 		}
@@ -199,4 +199,33 @@ func (ds *DataStore) GetMostRecentRateDate(ratePair RatePair, rateSource RateSou
 	}
 
 	return rate.Date, nil
+}
+
+func (ds *DataStore) AddRateValue(ratePair RatePair, rateSource RateSource, date time.Time, value float64) error {
+	rate := Rate{}
+	ratesColl := ds.GetCollection(dbCollRates)
+
+	err := ratesColl.Find(bson.M{
+		"rate_pair_id":   ratePair.ID,
+		"rate_source_id": rateSource.ID,
+		"date":           date}).One(&rate)
+
+	if err == nil {
+		return ErrRateExists
+
+	} else if err != mgo.ErrNotFound {
+		return err
+	}
+
+	err = ratesColl.Insert(&Rate{
+		RatePairID:   ratePair.ID,
+		RateSourceID: rateSource.ID,
+		Date:         date,
+		Value:        value,
+	})
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
