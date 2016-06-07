@@ -89,15 +89,8 @@ func getRateFromVisa(t time.Time) (float64, error) {
 			<span class="results"><strong>1</strong> United States Dollar = <strong>1.258974</strong> Canadian Dollar</span>
 		</p><br>
 	*/
-	resultsNode, err := htmlutil.GetFirstHtmlNode(doc, "span", "class", "results")
-	if err != nil {
-		return 0, err
-	}
-
-	strongNodes, err := htmlutil.GetAllHtmlNodes(resultsNode, "strong", "", "")
-	if err != nil {
-		return 0, err
-	}
+	resultsNode := htmlutil.GetFirstHtmlNode(doc, "span", "class", "results")
+	strongNodes := htmlutil.GetAllHtmlNodes(resultsNode, "strong", "", "")
 
 	for _, strongNode := range strongNodes {
 		if strongNode.FirstChild.Data == "1" {
